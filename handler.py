@@ -7,11 +7,16 @@ import os
 import subprocess
 import json
 import uuid
+import threading
 from fastapi import FastAPI, BackgroundTasks
 from pydantic import BaseModel
 from typing import Optional
+import signal
 
 app = FastAPI()
+
+# Job storage
+jobs = {}
 
 class TrainRequest(BaseModel):
     model_path: str
@@ -44,6 +49,9 @@ def root():
 def train(req: TrainRequest, background_tasks: BackgroundTasks):
     job_id = str(uuid.uuid4())[:8]
     
+    # Initialize job status
+    jobs[job_id] = {"status": "running", "started_at": str(uuid.uuid1())}
+    
     def run_training():
         cmd = [
             "accelerate", "launch",
@@ -72,12 +80,14 @@ def train(req: TrainRequest, background_tasks: BackgroundTasks):
         env["CUDA_VISIBLE_DEVICES"] = "0"
         
         try:
+            # Training timeout: max 3 hours (10800s)
+            # Account for kohya overhead + actual training
             result = subprocess.run(
                 cmd,
                 cwd="/kohya",
                 capture_output=True,
                 text=True,
-                timeout=7200,
+                timeout=10800,  # 3 hours max
                 env=env
             )
             
@@ -89,28 +99,32 @@ def train(req: TrainRequest, background_tasks: BackgroundTasks):
             
             status = "completed" if result.returncode == 0 else "failed"
             
-            with open(f"/tmp/status_{job_id}.json", "w") as f:
-                json.dump({
-                    "job_id": job_id,
-                    "status": status,
-                    "output_file": output_file,
-                    "returncode": result.returncode,
-                }, f)
+            jobs[job_id].update({
+                "status": status,
+                "output_file": output_file,
+                "returncode": result.returncode,
+            })
+            
+        except subprocess.TimeoutExpired:
+            jobs[job_id].update({
+                "status": "timeout",
+                "error": "Training exceeded 3 hour limit"
+            })
         except Exception as e:
-            with open(f"/tmp/status_{job_id}.json", "w") as f:
-                json.dump({"job_id": job_id, "status": "error", "error": str(e)}, f)
+            jobs[job_id].update({
+                "status": "error",
+                "error": str(e)
+            })
     
     background_tasks.add_task(run_training)
     
-    return TrainResponse(job_id=job_id, status="started")
+    return TrainResponse(job_id=job_id, status="running")
 
 @app.get("/status/{job_id}")
 def get_status(job_id: str):
-    status_file = f"/tmp/status_{job_id}.json"
-    if os.path.exists(status_file):
-        with open(status_file) as f:
-            return json.load(f)
-    return {"job_id": job_id, "status": "pending"}
+    if job_id in jobs:
+        return jobs[job_id]
+    return {"job_id": job_id, "status": "not_found"}
 
 if __name__ == "__main__":
     import uvicorn
