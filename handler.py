@@ -237,7 +237,7 @@ async def handler(event: dict) -> dict:
         return {"status": "failed", "error": str(e), "log": log_content}
 
 
-if __name__ == "__main__":
+if os.environ.get("LOCAL_TEST"):
     from fastapi import FastAPI, Request
     from fastapi.middleware.cors import CORSMiddleware
     import uvicorn
